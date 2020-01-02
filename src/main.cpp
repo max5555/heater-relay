@@ -1,4 +1,4 @@
-#include <Arduino.h>
+ #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <TimeLib.h>
 #include "WifiConfig.h"
@@ -12,27 +12,39 @@
 #define YOUR_WIFI_PASSWD "YOUR_WIFI_PASSWD"
 #endif // !WIFI_CONFIG_H
 
-#ifndef EMON_CONFIG_H
-#define EMON_NODE_ID "thermometer_id"
-#define EMON_DOMAIN "examplecom"
+#define OTA_HOSNAME "bedroom_room_r"
+
+// #ifndef EMON_CONFIG_H
+// #define EMON_APIKEY "XXXXXXXXXXXXX"
+// #endif // !EMON_CONFIG_H
+
+String EMON_SEND_NODE_ID = OTA_HOSNAME;
+
+#define EMON_GET_NODE_ID "44" //bedroom_room_t
+// #define EMON_SEND_NODE_ID ""
+#define EMON_DOMAIN "udom.ua"
 #define EMON_PATH "emoncms"
-#define EMON_APIKEY "XXXXXXXXXXXXX"
 #define EMON_DATA_CHECK_PERIOD_MAX 300 //sec
-#define EMON_GET_DATA_TIMEOUT 1000
-#endif // !EMON_CONFIG_H
+#define EMON_GET_DATA_TIMEOUT 2000 //ms
+#define EMON_UPLOAD_PERIOD_MAX 300 //sec
 
 #define ONBOARDLED 2 // Built in LED on ESP-12/ESP-07
 #define FIRST_RELAY D2
 #define SECOND_RELAY D5
 
-#define SHOW_TIME_PERIOD 10 //sec
-#define NTP_TIMEOUT 2000  // ms Response timeout for NTP requests //1500 говорят минимальное 2000
-#define NTP_SYNC_PERIOD_MAX 86400// 24*60*60  sec
-#define LOOP_DELAY_MAX 50// 24*60*60 sec
+#define SHOW_TIME_PERIOD 10       //sec
+#define NTP_TIMEOUT 2000          // ms Response timeout for NTP requests //1500 говорят минимальное 2000
+#define NTP_SYNC_PERIOD_MAX 86400 // 24*60*60  sec
+#define LOOP_DELAY_MAX 50         // 24*60*60 sec
+
+unsigned emon_upload_period = 120; //Upload period sec
+unsigned emon_get_period = 120;     //sec
+int temp_max = 19; //максимальная температура, при которой все реле отключаются
+int temp_prev_switch = 0; //температура, при которой последний раз загружалось реле
+int n_relays_to_turn_on_prev = -1; //число реле, включенных при последнем переключении
 
 int ntp_sync_period = 63;
 int loop_delay = 1;
-
 
 int8_t timeZone = 2;
 int8_t minutesTimeZone = 0;
@@ -41,10 +53,11 @@ const PROGMEM char *ntpServer = "europe.pool.ntp.org"; //"ua.pool.ntp.org"; //"t
 bool wifiFirstConnected = false;
 bool FirstStart = true;
 unsigned long time_last_data_check = 0;
+unsigned long t_sent, t_get = 0;
 unsigned long time_last_emon_data = 0;
-unsigned n_relays_to_turn_on = 0;
+int n_relays_to_turn_on = 0;
 unsigned emon_data_check_period = 10;
-float dat, corrected_dat, degree_to_add;
+float dat, corrected_dat, corrected_dat_prev, degree_to_add;
 String ip;
 
 WiFiClient Client;
@@ -106,12 +119,14 @@ String get_emon_data()
   String json;
   Serial.print("connect to Server ");
   Serial.println(EMON_DOMAIN);
+  Serial.print("GET /emoncms/feed/timevalue.json?id=");
+  Serial.println(EMON_GET_NODE_ID);
 
   if (Client.connect(EMON_DOMAIN, 80))
   {
     Serial.println("connected");
     Client.print("GET /emoncms/feed/timevalue.json?id="); //http://udom.ua/emoncms/feed/feed/timevalue.json?id=18
-    Client.print(EMON_NODE_ID);
+    Client.print(EMON_GET_NODE_ID);
     Client.println();
 
     unsigned long tstart = millis();
@@ -142,9 +157,9 @@ String get_emon_data()
 // запрашиваем и извлекаем данные из json
 void get_and_parse_json_data(
     unsigned long &time_last_data_check, //когда последний раз проверялись данные
-    float &dat,                            //извлекаемые данные
-    unsigned long &time_last_emon_data  //время последних данных котороые хранятся в emoncms
-  )
+    float &dat,                          //извлекаемые данные
+    unsigned long &time_last_emon_data   //время последних данных котороые хранятся в emoncms
+)
 {
 
   if ((millis() - time_last_data_check) > emon_data_check_period)
@@ -153,7 +168,7 @@ void get_and_parse_json_data(
     DynamicJsonDocument doc(1024);
     deserializeJson(doc, json);
 
-    int dat = doc["value"];
+    dat = doc["value"];
     unsigned long time_last_emon_data = doc["time"];
 
     Serial.println();
@@ -233,6 +248,35 @@ void setup()
   ArduinoOTA.begin();
 }
 
+bool startNTP()
+{
+  Serial.println();
+  Serial.println("*** startNTP ***");
+  NTP.begin(ntpServer, timeZone, true, minutesTimeZone);
+  //NTP.begin("pool.ntp.org", 2, true);
+  delay(3000); // there seems to be a 1 second delay before first sync will be attempted, delay 2 seconds allows request to be made and received
+  int counter = 1;
+  Serial.print("NTP.getLastNTPSync() = ");
+  Serial.println(NTP.getLastNTPSync());
+  while (!NTP.getLastNTPSync() && counter <= 3)
+  {
+    NTP.begin(ntpServer, timeZone, true, minutesTimeZone);
+    Serial.print("NTP CHECK: #");
+    Serial.println(counter);
+    counter += 1;
+    delay(counter * 2000);
+  };
+  NTP.setInterval(ntp_sync_period); // in seconds
+  if (now() < 100000)
+  {
+    return false;
+  }
+  else
+  {
+    return true;
+  }
+}
+
 void TimeValidator()
 { //проверяем время, если неправильное - перезагружаемся
 
@@ -242,6 +286,11 @@ void TimeValidator()
     ip = WiFi.localIP().toString();
     if (now() < 100000 and (ip != "0.0.0.0"))
     {
+      bool isntpok = startNTP();
+      if (isntpok)
+      {
+        return;
+      }
       Serial.print("Wrong UNIX time: now() = ");
       //Serial.println(NTP.getTimeStr());
       Serial.println(now());
@@ -250,7 +299,7 @@ void TimeValidator()
       Serial.print("ectr = ");
       Serial.println(ectr);
       Serial.print("delay ");
-      Serial.print(30000 * ectr);
+      Serial.print(10000 * ectr);
       Serial.println(" sec");
       delay(30000 * ectr);
     }
@@ -265,24 +314,6 @@ void TimeValidator()
   //            WiFi.forceSleepBegin(); wdt_reset(); ESP.restart(); while(1)wdt_reset();
   //            ESP.reset();
   ESP.restart();
-}
-
-void startNTP() {
-    Serial.println();
-    Serial.println("*** startNTP ***");
-    NTP.begin(ntpServer, timeZone, true, minutesTimeZone);
-    //NTP.begin("pool.ntp.org", 2, true);
-    delay(2000); // there seems to be a 1 second delay before first sync will be attempted, delay 2 seconds allows request to be made and received
-    int counter = 1;
-    Serial.print("NTP.getLastNTPSync() = ");
-    Serial.println(NTP.getLastNTPSync());
-    while ( !NTP.getLastNTPSync() && counter <=3) {
-        Serial.print("NTP CHECK: #");
-        Serial.println(counter);
-        counter +=1;
-        delay(2000);
-    };
-    NTP.setInterval(ntp_sync_period); // in seconds
 }
 
 void loop()
@@ -307,7 +338,7 @@ void loop()
   {
     Serial.println("*** wifiFirstConnected ***");
     wifiFirstConnected = false;
-    NTP.setInterval(63); //60 * 5 + 3    //63 Changes sync period. New interval in seconds.
+    NTP.setInterval(63);            //60 * 5 + 3    //63 Changes sync period. New interval in seconds.
     NTP.setNTPTimeout(NTP_TIMEOUT); //Configure response timeout for NTP requests milliseconds
     startNTP();
     //NTP.begin(ntpServer, timeZone, true, minutesTimeZone);
@@ -350,13 +381,11 @@ void loop()
 
   get_and_parse_json_data(time_last_data_check, dat, time_last_emon_data);
 
-
   Serial.println();
   Serial.print("temperature in ");
   Serial.print(OTA_HOSNAME);
   Serial.print(" is ");
-  Serial.println(dat);
-
+  Serial.println(dat, 2);
 
   if (hour() >= 23)
   {
@@ -366,11 +395,14 @@ void loop()
   {
     degree_to_add = -1; //прогреваем комнату перед подъемом
   }
-  else if (hour() > 20 and hour() < 11)
+  else if (hour() >= 19 and hour() < 20)
+  {
+    degree_to_add = 0.5 ; //охлаждаем комнату перед сном комнату перед сном
+  }
+  else if (hour() >= 20 and hour() < 23)
   {
     degree_to_add = 1; //охлаждаем комнату перед сном комнату перед подъемом
   }
-
   corrected_dat = dat + degree_to_add;
 
   Serial.print("corrected temperature in ");
@@ -378,46 +410,117 @@ void loop()
   Serial.print(" is ");
   Serial.println(corrected_dat);
 
-  if (corrected_dat <= 18)
+  if (corrected_dat <= temp_max-1)
   {
-    digitalWrite(FIRST_RELAY, HIGH);
-    digitalWrite(SECOND_RELAY, HIGH);
+    // digitalWrite(FIRST_RELAY, HIGH);
+    // digitalWrite(SECOND_RELAY, HIGH);
     n_relays_to_turn_on = 2;
   }
-  else if (corrected_dat > 18 and corrected_dat <= 19)
+  else if (corrected_dat > temp_max-1 and corrected_dat < temp_max)
   {
-    digitalWrite(FIRST_RELAY, HIGH);
-    digitalWrite(SECOND_RELAY, LOW);
+    // digitalWrite(FIRST_RELAY, HIGH);
+    // digitalWrite(SECOND_RELAY, LOW);
     n_relays_to_turn_on = 1;
   }
-  else if (corrected_dat > 19)
+  else if (corrected_dat >= temp_max)
   {
-    digitalWrite(FIRST_RELAY, LOW);
-    digitalWrite(SECOND_RELAY, LOW);
-    n_relays_to_turn_on = 1;
+    // digitalWrite(FIRST_RELAY, LOW);
+    // digitalWrite(SECOND_RELAY, LOW);
+    n_relays_to_turn_on = 0;
   }
 
   Serial.print("n_relays_to_turn_on = ");
   Serial.println(n_relays_to_turn_on);
 
-  if (emon_data_check_period < EMON_DATA_CHECK_PERIOD_MAX){
-    emon_data_check_period +=10;
+  if (emon_data_check_period < EMON_DATA_CHECK_PERIOD_MAX)
+  {
+    emon_data_check_period += 10;
   }
 
-  if (now() > 100000 and ip != "0.0.0.0" and ntp_sync_period < NTP_SYNC_PERIOD_MAX){ //постепенно увеличиваем период обновлений до суток
+  if (now() > 100000 and ip != "0.0.0.0" and ntp_sync_period < NTP_SYNC_PERIOD_MAX)
+  { //постепенно увеличиваем период обновлений до суток
     ntp_sync_period += 63;
     Serial.print("ntp_sync_period = ");
     Serial.println(ntp_sync_period);
     NTP.setInterval(ntp_sync_period); // in seconds
-    if (loop_delay < LOOP_DELAY_MAX){ //постепенно увеличиваем период обновлений до суток
+    if (loop_delay < LOOP_DELAY_MAX)
+    {                  //постепенно увеличиваем период обновлений до суток
       loop_delay += 1; //sec
     }
-  }  
+  }
+  else if (now() < 100000 and ip != "0.0.0.0")
+  {
+    TimeValidator();
+  }
+
+  bool big_temp_change = abs(corrected_dat-corrected_dat_prev)>=0.1;
+  Serial.print("big_temp_change = ");
+  Serial.println(big_temp_change);
+
+  if (dat and n_relays_to_turn_on_prev != n_relays_to_turn_on and big_temp_change)
+  {
+    corrected_dat_prev = corrected_dat;
+    n_relays_to_turn_on_prev = n_relays_to_turn_on;
+
+    if (n_relays_to_turn_on == 2)
+    {
+      digitalWrite(FIRST_RELAY, HIGH);
+      digitalWrite(SECOND_RELAY, HIGH);
+    }
+    else if (n_relays_to_turn_on == 1)
+    {
+      digitalWrite(FIRST_RELAY, HIGH);
+      digitalWrite(SECOND_RELAY, LOW);
+    }
+    else
+    {
+      digitalWrite(FIRST_RELAY, LOW);
+      digitalWrite(SECOND_RELAY, LOW);
+    }
+  }
+  else{
+    n_relays_to_turn_on = n_relays_to_turn_on_prev; //если нет данных или температура изменилась меньше чем на 0.2 градуса, то реле не переключаем
+  }
+
+  //      if( Client.connect(EMON_DOMAIN, 80) && temp1>-50 && temp2>-50 )
+  if (Client.connect(EMON_DOMAIN, 80) && (millis() - t_get) > emon_upload_period * 1000)
+  {
+    t_get = millis();
+    Serial.println("connect to Server to SEND data...");
+    Client.print("GET /");
+    Client.print(EMON_PATH);
+    Client.print("/input/post.json?apikey=");
+    Client.print(EMON_APIKEY);
+    Client.print("&node=");
+    Client.print(EMON_SEND_NODE_ID);
+    Client.print("&json={n_relay_1:");
+    Client.print(n_relays_to_turn_on);
+    //          Client.print(",temp2:");
+    //          Client.print(temp2);
+    Client.print("}");
+    Client.println();
+    //          http://udom.ua/emoncms/input/post.json?node=tutu&fulljson={power1:100,power2:200,power3:300}
+
+    unsigned long old = millis();
+    while ((millis() - old) < 500) // 500ms timeout for 'ok' answer from server
+    {
+      while (Client.available())
+      {
+        Serial.write(Client.read());
+      }
+    }
+    Client.stop();
+    Serial.println("\nclosed");
+
+    if (emon_upload_period < EMON_UPLOAD_PERIOD_MAX)
+    {
+      emon_upload_period += 1;
+    }
+  }
 
   Serial.print("loop_delay = ");
   Serial.print(loop_delay);
   Serial.println(" sec");
-  delay(loop_delay*1000); //задержка большого цикла
+  delay(loop_delay * 1000); //задержка большого цикла
   FirstStart = false;
 }
-
