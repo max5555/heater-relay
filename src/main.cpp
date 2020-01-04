@@ -39,7 +39,7 @@ String EMON_SEND_NODE_ID = OTA_HOSNAME;
 
 unsigned emon_upload_period = 120; //Upload period sec
 unsigned emon_get_period = 120;     //sec
-int temp_max = 19; //максимальная температура, при которой все реле отключаются
+int temp_max = 20; //максимальная температура, при которой все реле отключаются
 int temp_prev_switch = 0; //температура, при которой последний раз загружалось реле
 int n_relays_to_turn_on_prev = -1; //число реле, включенных при последнем переключении
 
@@ -401,7 +401,7 @@ void loop()
   }
   else if (hour() >= 20 and hour() < 23)
   {
-    degree_to_add = 1; //охлаждаем комнату перед сном комнату перед подъемом
+    degree_to_add = 1; //охлаждаем комнату перед сном
   }
   corrected_dat = dat + degree_to_add;
 
@@ -410,7 +410,7 @@ void loop()
   Serial.print(" is ");
   Serial.println(corrected_dat);
 
-  if (corrected_dat <= temp_max-1)
+  if (corrected_dat <= temp_max-1) //если температура на градус меньше максимальной, то греем на полную
   {
     // digitalWrite(FIRST_RELAY, HIGH);
     // digitalWrite(SECOND_RELAY, HIGH);
@@ -453,7 +453,7 @@ void loop()
     TimeValidator();
   }
 
-  bool big_temp_change = abs(corrected_dat-corrected_dat_prev)>=0.1;
+  bool big_temp_change = abs(corrected_dat-corrected_dat_prev)>=0.1; //абсолютноеизменение температуры
   Serial.print("big_temp_change = ");
   Serial.println(big_temp_change);
 
