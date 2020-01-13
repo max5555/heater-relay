@@ -1,4 +1,4 @@
- #include <Arduino.h>
+#include <Arduino.h>
 #include <ArduinoJson.h>
 #include <TimeLib.h>
 #include "WifiConfig.h"
@@ -25,8 +25,8 @@ String EMON_SEND_NODE_ID = OTA_HOSNAME;
 #define EMON_DOMAIN "udom.ua"
 #define EMON_PATH "emoncms"
 #define EMON_DATA_CHECK_PERIOD_MAX 300 //sec
-#define EMON_GET_DATA_TIMEOUT 2000 //ms
-#define EMON_UPLOAD_PERIOD_MAX 300 //sec
+#define EMON_GET_DATA_TIMEOUT 2000     //ms
+#define EMON_UPLOAD_PERIOD_MAX 300     //sec
 
 #define ONBOARDLED 2 // Built in LED on ESP-12/ESP-07
 #define FIRST_RELAY D2
@@ -38,9 +38,9 @@ String EMON_SEND_NODE_ID = OTA_HOSNAME;
 #define LOOP_DELAY_MAX 50         // 24*60*60 sec
 
 unsigned emon_upload_period = 120; //Upload period sec
-unsigned emon_get_period = 120;     //sec
-int temp_max = 20; //максимальная температура, при которой все реле отключаются
-int temp_prev_switch = 0; //температура, при которой последний раз загружалось реле
+unsigned emon_get_period = 120;    //sec
+int temp_max = 20;                 //максимальная температура, при которой все реле отключаются
+int temp_prev_switch = 0;          //температура, при которой последний раз загружалось реле
 int n_relays_to_turn_on_prev = -1; //число реле, включенных при последнем переключении
 
 int ntp_sync_period = 63;
@@ -52,9 +52,7 @@ const PROGMEM char *ntpServer = "europe.pool.ntp.org"; //"ua.pool.ntp.org"; //"t
 //pool1.ntp.od.ua
 bool wifiFirstConnected = false;
 bool FirstStart = true;
-unsigned long time_last_data_check = 0;
-unsigned long t_sent, t_get = 0;
-unsigned long time_last_emon_data = 0;
+unsigned long time_last_data_sent, time_last_data_get, time_last_emon_data = 0;
 int n_relays_to_turn_on = 0;
 unsigned emon_data_check_period = 10;
 float dat, corrected_dat, corrected_dat_prev, degree_to_add;
@@ -156,13 +154,13 @@ String get_emon_data()
 
 // запрашиваем и извлекаем данные из json
 void get_and_parse_json_data(
-    unsigned long &time_last_data_check, //когда последний раз проверялись данные
-    float &dat,                          //извлекаемые данные
-    unsigned long &time_last_emon_data   //время последних данных котороые хранятся в emoncms
+    unsigned long &time_last_data_get, //когда последний раз проверялись данные
+    float &dat,                        //извлекаемые данные
+    unsigned long &time_last_emon_data //время последних данных котороые хранятся в emoncms
 )
 {
 
-  if ((millis() - time_last_data_check) > emon_data_check_period)
+  if ((millis() - time_last_data_get) > emon_data_check_period)
   {
     String json = get_emon_data();
     DynamicJsonDocument doc(1024);
@@ -183,7 +181,7 @@ void get_and_parse_json_data(
     Serial.print(", dt_last_dat = ");
     Serial.println(dt_last_dat);
 
-    time_last_data_check = millis();
+    time_last_data_get = millis();
   }
   else
   {
@@ -387,6 +385,7 @@ void loop()
   Serial.print(" is ");
   Serial.println(dat, 2);
 
+  degree_to_add = 0; //default value
   if (hour() >= 23)
   {
     degree_to_add = -0.5; //ночью разрешаем греть чуть больше
@@ -397,7 +396,7 @@ void loop()
   }
   else if (hour() >= 19 and hour() < 20)
   {
-    degree_to_add = 0.5 ; //охлаждаем комнату перед сном комнату перед сном
+    degree_to_add = 0.5; //охлаждаем комнату перед сном комнату перед сном
   }
   else if (hour() >= 20 and hour() < 23)
   {
@@ -410,13 +409,13 @@ void loop()
   Serial.print(" is ");
   Serial.println(corrected_dat);
 
-  if (corrected_dat <= temp_max-1) //если температура на градус меньше максимальной, то греем на полную
+  if (corrected_dat <= temp_max - 1) //если температура на градус меньше максимальной, то греем на полную
   {
     // digitalWrite(FIRST_RELAY, HIGH);
     // digitalWrite(SECOND_RELAY, HIGH);
     n_relays_to_turn_on = 2;
   }
-  else if (corrected_dat > temp_max-1 and corrected_dat < temp_max)
+  else if (corrected_dat > temp_max - 1 and corrected_dat < temp_max)
   {
     // digitalWrite(FIRST_RELAY, HIGH);
     // digitalWrite(SECOND_RELAY, LOW);
@@ -453,7 +452,7 @@ void loop()
     TimeValidator();
   }
 
-  bool big_temp_change = abs(corrected_dat-corrected_dat_prev)>=0.1; //абсолютноеизменение температуры
+  bool big_temp_change = abs(corrected_dat - corrected_dat_prev) >= 0.1; //абсолютноеизменение температуры
   Serial.print("big_temp_change = ");
   Serial.println(big_temp_change);
 
@@ -478,14 +477,15 @@ void loop()
       digitalWrite(SECOND_RELAY, LOW);
     }
   }
-  else{
+  else
+  {
     n_relays_to_turn_on = n_relays_to_turn_on_prev; //если нет данных или температура изменилась меньше чем на 0.2 градуса, то реле не переключаем
   }
 
   //      if( Client.connect(EMON_DOMAIN, 80) && temp1>-50 && temp2>-50 )
-  if (Client.connect(EMON_DOMAIN, 80) && (millis() - t_get) > emon_upload_period * 1000)
+  if (Client.connect(EMON_DOMAIN, 80) && (millis() - time_last_data_sent) > emon_upload_period * 1000)
   {
-    t_get = millis();
+    time_last_data_sent = millis();
     Serial.println("connect to Server to SEND data...");
     Client.print("GET /");
     Client.print(EMON_PATH);
